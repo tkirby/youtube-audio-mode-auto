@@ -55,6 +55,8 @@ if (!window.__youtubeAudioModeLoaded) {
     let forcedViaUI = false;          // fallback: quality was forced through the settings menu
     let capFallbackTimer = null;
     let cappedForUrl = null;
+    let preCapQuality = null;         // quality before audio mode, restored on manual switch-out
+    let releaseTimer = null;
     const CAP_FALLBACK_DELAY = 60000; // give YouTube's buffer time to roll over before forcing
 
     // Utility to lock manual detection during automated changes
@@ -180,7 +182,7 @@ if (!window.__youtubeAudioModeLoaded) {
             if (audioModeEnabled) {
                 // If the user switches off an auto-enabled video, leave that video alone
                 if (autoActive) suppressedVideoId = getCurrentVideoId();
-                disableAudioMode();
+                disableAudioMode({ immediate: true }); // user wants to see the picture now
             } else {
                 autoActive = false;
                 setAutoBadge(false);
@@ -282,7 +284,7 @@ if (!window.__youtubeAudioModeLoaded) {
         startUsageTracking();
     }
 
-    function disableAudioMode() {
+    function disableAudioMode({ immediate = false } = {}) {
         audioModeEnabled = false;
         if (autoActive) {
             autoActive = false;
@@ -291,7 +293,7 @@ if (!window.__youtubeAudioModeLoaded) {
         const video = getVideoElement();
         if (video) video.style.opacity = '1';
 
-        restoreQuality();
+        restoreQuality(immediate);
 
         const player = document.getElementById('movie_player');
         if (player) delete player.__audioModeQualityAttempted;
@@ -470,6 +472,9 @@ if (!window.__youtubeAudioModeLoaded) {
         if (cappedForUrl === location.href && qualityCapActive) return; // already capped for this video
 
         const current = await playerCall('getPlaybackQuality');
+        if (current && !LOW_QUALITIES.includes(current) && current !== 'unknown' && current !== 'auto') {
+            preCapQuality = current;
+        }
         setProgrammaticLock();
         qualityCapActive = true;
         cappedForUrl = location.href;
@@ -495,13 +500,52 @@ if (!window.__youtubeAudioModeLoaded) {
         }, CAP_FALLBACK_DELAY);
     };
 
-    const restoreQuality = () => {
+    const restoreQuality = (immediate = false) => {
         const video = getVideoElement();
-        doRestoreQuality(video);
+        doRestoreQuality(video, immediate);
     };
 
+    const QUALITY_ORDER = ['tiny', 'small', 'medium', 'large', 'hd720', 'hd1080', 'hd1440', 'hd2160', 'hd2880', 'highres'];
+    const QUALITY_LABEL = { medium: '360p', large: '480p', hd720: '720p', hd1080: '1080p', hd1440: '1440p', hd2160: '2160p' };
+
+    async function pickRestoreTarget() {
+        if (preCapQuality) return preCapQuality;
+        const levels = (await playerCall('getAvailableQualityLevels')) || [];
+        // Best available, up to 1080p
+        const max = QUALITY_ORDER.indexOf('hd1080');
+        const usable = levels.filter(q => QUALITY_ORDER.indexOf(q) >= 0 && QUALITY_ORDER.indexOf(q) <= max);
+        usable.sort((a, b) => QUALITY_ORDER.indexOf(b) - QUALITY_ORDER.indexOf(a));
+        return usable[0] || 'hd720';
+    }
+
+    // Jump straight to a sharp picture (short rebuffer), then hand control back to Auto.
+    async function restoreImmediately(video) {
+        const target = await pickRestoreTarget();
+        setProgrammaticLock();
+        await playerCall('setPlaybackQualityRange', [target, target]);
+        console.log('[Audio Mode] Switching out: forcing', target, 'now');
+
+        if (releaseTimer) clearTimeout(releaseTimer);
+        // If the API didn't take within 3s, use the settings menu instead
+        setTimeout(async () => {
+            if (audioModeEnabled) return;
+            const q = await playerCall('getPlaybackQuality');
+            if (q && LOW_QUALITIES.includes(q) && video && QUALITY_LABEL[target]) {
+                console.log('[Audio Mode] Still at', q, '- selecting', QUALITY_LABEL[target], 'via menu');
+                clickQualitySetting(video, QUALITY_LABEL[target]);
+            }
+        }, 3000);
+        // Once sharp, give quality control back to YouTube's Auto
+        releaseTimer = setTimeout(async () => {
+            releaseTimer = null;
+            if (audioModeEnabled) return;
+            setProgrammaticLock();
+            await playerCall('setPlaybackQualityRange', ['auto', 'auto']);
+        }, 8000);
+    }
+
     // Remove the cap and hand control back to YouTube's Auto quality.
-    const doRestoreQuality = async (video) => {
+    const doRestoreQuality = async (video, immediate = false) => {
         if (capFallbackTimer) { clearTimeout(capFallbackTimer); capFallbackTimer = null; }
         const wasForcedViaUI = forcedViaUI;
         const hadCap = qualityCapActive;
@@ -515,7 +559,9 @@ if (!window.__youtubeAudioModeLoaded) {
         if (userPicked) return; // respect a quality the user chose themselves
 
         try {
-            if (wasForcedViaUI && video) {
+            if (immediate && (hadCap || wasForcedViaUI)) {
+                await restoreImmediately(video);
+            } else if (wasForcedViaUI && video) {
                 clickQualitySetting(video, 'Auto'); // undo the menu selection
             } else if (hadCap) {
                 await playerCall('setPlaybackQualityRange', ['auto', 'auto']);
@@ -856,7 +902,7 @@ if (!window.__youtubeAudioModeLoaded) {
             if (autoMusicEnabled) {
                 if (!audioModeEnabled) evaluateAutoMusic();
             } else if (autoActive) {
-                disableAudioMode();
+                disableAudioMode({ immediate: true });
             }
         });
     }
