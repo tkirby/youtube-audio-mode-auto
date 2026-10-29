@@ -43,6 +43,21 @@
         };
     }
 
+    // ===== Player RPC for the content script =====
+    const ALLOWED = ['getPlaybackQuality', 'setPlaybackQualityRange', 'getAvailableQualityLevels'];
+    window.addEventListener('message', (event) => {
+        if (event.source !== window || !event.data || event.data.type !== 'AM_RPC') return;
+        const { id, method, args } = event.data;
+        let result;
+        try {
+            const player = document.getElementById('movie_player');
+            if (ALLOWED.includes(method) && player && typeof player[method] === 'function') {
+                result = player[method](...(Array.isArray(args) ? args : []));
+            }
+        } catch (e) { }
+        window.postMessage({ type: 'AM_RPC_RESULT', id, result }, '*');
+    });
+
     window.addEventListener('message', (event) => {
         if (event.source !== window || !event.data || event.data.type !== 'AM_MUSIC_QUERY') return;
         window.postMessage({ type: 'AM_MUSIC_INFO', id: event.data.id, info: getMusicInfo() }, '*');

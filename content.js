@@ -50,6 +50,13 @@ if (!window.__youtubeAudioModeLoaded) {
     let programmaticQualityLock = 0;
     let userManuallyChangedQuality = false;
 
+    // Smooth quality handling
+    let qualityCapActive = false;     // we asked YouTube to cap quality at 144p
+    let forcedViaUI = false;          // fallback: quality was forced through the settings menu
+    let capFallbackTimer = null;
+    let cappedForUrl = null;
+    const CAP_FALLBACK_DELAY = 60000; // give YouTube's buffer time to roll over before forcing
+
     // Utility to lock manual detection during automated changes
     function setProgrammaticLock() {
         programmaticQualityLock = Date.now();
@@ -94,6 +101,8 @@ if (!window.__youtubeAudioModeLoaded) {
     window.addEventListener('message', (event) => {
         if (event.source !== window || !event.data) return;
         if (event.data.type === 'AM_QUALITY_CHANGE') {
+            // While capped, YouTube's own step-down to 144p/240p is expected, not a user action
+            if (qualityCapActive && (event.data.quality === 'tiny' || event.data.quality === 'small')) return;
             if (isQualityLocked()) return;
             console.log('[Audio Mode] User manually changed quality to', event.data.quality);
             userManuallyChangedQuality = true;
@@ -404,7 +413,7 @@ if (!window.__youtubeAudioModeLoaded) {
                         } else {
                             menuItems[menuItems.length - 1].click();
                         }
-                    } else if (targetText === '720p') {
+                    } else if (targetText === '720p' || targetText === 'Auto') {
                         const autoOption = menuItems.find(item => item.textContent.includes('Auto') || item.textContent.includes('تلقائية'));
                         if (autoOption) {
                             setProgrammaticLock();
@@ -433,98 +442,85 @@ if (!window.__youtubeAudioModeLoaded) {
         }
     };
 
-    const forceLowestQuality = (player, video) => {
+    // ----- Main-world RPC (player methods are only visible from the page context) -----
+    function playerCall(method, args = []) {
+        return new Promise(resolve => {
+            const id = Math.random().toString(36).slice(2);
+            const handler = (event) => {
+                if (event.source !== window || !event.data || event.data.type !== 'AM_RPC_RESULT' || event.data.id !== id) return;
+                window.removeEventListener('message', handler);
+                clearTimeout(timer);
+                resolve(event.data.result);
+            };
+            const timer = setTimeout(() => {
+                window.removeEventListener('message', handler);
+                resolve(undefined);
+            }, 800);
+            window.addEventListener('message', handler);
+            window.postMessage({ type: 'AM_RPC', id, method, args }, '*');
+        });
+    }
+
+    const LOW_QUALITIES = ['tiny', 'small'];
+
+    // Ask YouTube's adaptive streaming to stay at 144p. It steps down at the next
+    // chunk boundary like its own "Auto" switches, so the buffer isn't thrown away.
+    const forceLowestQuality = async (player, video) => {
         if (userManuallyChangedQuality) return;
+        if (cappedForUrl === location.href && qualityCapActive) return; // already capped for this video
 
-        const applyAPI = () => {
-            try {
-                if (player.setPlaybackQualityRange) player.setPlaybackQualityRange('tiny', 'tiny');
-                if (player.setPlaybackQuality) player.setPlaybackQuality('tiny');
-                if (typeof player.setInternalQuality === 'function') player.setInternalQuality('tiny');
-                if (player.playerInfo && player.playerInfo.setPlaybackQuality) player.playerInfo.setPlaybackQuality('tiny');
-            } catch (e) { }
+        const current = await playerCall('getPlaybackQuality');
+        setProgrammaticLock();
+        qualityCapActive = true;
+        cappedForUrl = location.href;
+
+        if (!LOW_QUALITIES.includes(current)) {
+            await playerCall('setPlaybackQualityRange', ['tiny', 'tiny']);
+            console.log('[Audio Mode] Quality capped at 144p (smooth), was', current);
         }
 
-        try {
-            setProgrammaticLock();
-            const wasPlaying = !video.paused;
-
-            // Apply immediately
-            applyAPI();
-
-            // Aggressively re-apply for 2 seconds to defeat YouTube's startup adaptive engine
-            let attempts = 0;
-            const aggressiveLock = setInterval(() => {
-                if (userManuallyChangedQuality || attempts > 4) {
-                    clearInterval(aggressiveLock);
-                    return;
-                }
-                const currentQuality = player.getPlaybackQuality ? player.getPlaybackQuality() : 'unknown';
-                if (currentQuality !== 'tiny' && currentQuality !== 'small') {
-                    applyAPI();
-                }
-                attempts++;
-            }, 500);
-
-            // Give API 2.5 seconds to settle before attempting the UI click fallback
-            setTimeout(() => {
-                const currentQuality = player.getPlaybackQuality ? player.getPlaybackQuality() : 'unknown';
-                const isFirstAttempt = !player.__audioModeQualityAttempted;
-
-                if (currentQuality !== 'tiny' && currentQuality !== 'small') {
-                    if (isFirstAttempt) {
-                        player.__audioModeQualityAttempted = true;
-                        clickQualitySetting(video, '144p');
-                        return;
-                    }
-                } else {
-                    player.__audioModeQualityAttempted = true;
-                }
-
-                if (wasPlaying && video.paused) {
-                    video.play().catch(err => console.log('[Audio Mode] Could not resume playback:', err));
-                }
-            }, 2500);
-
-        } catch (error) {
-            console.error('[Audio Mode] Error setting quality:', error);
-        }
+        // Fallback: if YouTube ignores the cap, force it the old way, but only after
+        // the buffer has had plenty of time to roll over.
+        if (capFallbackTimer) clearTimeout(capFallbackTimer);
+        const urlAtCap = location.href;
+        capFallbackTimer = setTimeout(async () => {
+            capFallbackTimer = null;
+            if (!audioModeEnabled || userManuallyChangedQuality || location.href !== urlAtCap) return;
+            const q = await playerCall('getPlaybackQuality');
+            if (q && !LOW_QUALITIES.includes(q)) {
+                console.log('[Audio Mode] Cap ignored (still at', q, ') - forcing 144p via menu');
+                forcedViaUI = true;
+                clickQualitySetting(video, '144p');
+            }
+        }, CAP_FALLBACK_DELAY);
     };
 
     const restoreQuality = () => {
-        const player = document.getElementById('movie_player');
         const video = getVideoElement();
-
-        if (!player || !video) {
-            setTimeout(() => {
-                const p = document.getElementById('movie_player');
-                const v = getVideoElement();
-                if (p && v) doRestoreQuality(p, v);
-            }, 200);
-            return;
-        }
-
-        doRestoreQuality(player, video);
+        doRestoreQuality(video);
     };
 
-    const doRestoreQuality = (player, video) => {
+    // Remove the cap and hand control back to YouTube's Auto quality.
+    const doRestoreQuality = async (video) => {
+        if (capFallbackTimer) { clearTimeout(capFallbackTimer); capFallbackTimer = null; }
+        const wasForcedViaUI = forcedViaUI;
+        const hadCap = qualityCapActive;
+        qualityCapActive = false;
+        forcedViaUI = false;
+        cappedForUrl = null;
         setProgrammaticLock();
+        const userPicked = userManuallyChangedQuality;
         userManuallyChangedQuality = false;
 
+        if (userPicked) return; // respect a quality the user chose themselves
+
         try {
-            const availableLevels = player.getAvailableQualityLevels ? player.getAvailableQualityLevels() : [];
-            let target = QUALITY.RESTORE;
-            let uiTargetText = '720p';
-
-            if (availableLevels.length > 0 && !availableLevels.includes(QUALITY.RESTORE)) {
-                target = 'auto';
-                uiTargetText = 'Auto';
+            if (wasForcedViaUI && video) {
+                clickQualitySetting(video, 'Auto'); // undo the menu selection
+            } else if (hadCap) {
+                await playerCall('setPlaybackQualityRange', ['auto', 'auto']);
+                console.log('[Audio Mode] Quality cap removed (smooth)');
             }
-
-            if (player.setPlaybackQualityRange) player.setPlaybackQualityRange('auto', 'auto');
-            if (player.setPlaybackQuality) player.setPlaybackQuality(target);
-
-            clickQualitySetting(video, uiTargetText);
         } catch (e) {
             console.error('[Audio Mode] Error restoring quality:', e);
         }
@@ -876,6 +872,7 @@ if (!window.__youtubeAudioModeLoaded) {
 
             setProgrammaticLock();
             userManuallyChangedQuality = false;
+            cappedForUrl = null;
 
             if (audioModeEnabled && !autoActive) {
                 setTimeout(() => enableAudioMode(), TIMING.RETRY_DELAY);
