@@ -770,3 +770,21 @@ if (supportBtn) {
     });
 }
 
+
+// ===== Auto Music toggle =====
+const autoMusicToggle = document.getElementById('autoMusicToggle');
+if (autoMusicToggle) {
+    chrome.storage.sync.get(['autoMusic'], (result) => {
+        autoMusicToggle.checked = result.autoMusic !== false;
+    });
+    autoMusicToggle.addEventListener('change', () => {
+        chrome.storage.sync.set({ autoMusic: autoMusicToggle.checked });
+        // Content scripts react via storage.onChanged; refresh the main toggle shortly after
+        setTimeout(() => {
+            if (!targetTabId) return;
+            chrome.tabs.sendMessage(targetTabId, { action: 'getStatus' })
+                .then(r => { if (r) updateUI(r.enabled); })
+                .catch(() => { });
+        }, 1500);
+    });
+}

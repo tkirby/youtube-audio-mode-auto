@@ -40,6 +40,12 @@ if (!window.__youtubeAudioModeLoaded) {
     let isApplyingSpeed = false;
     let userSetSpeed = false;
 
+    // Auto Music state
+    let autoMusicEnabled = true;      // setting: auto-enable on music videos
+    let autoActive = false;           // true when current audio mode was turned on automatically
+    let suppressedVideoId = null;     // user turned audio mode off on this auto-detected video
+    let autoEvalToken = 0;
+
     // Bi-directional Sync Variables
     let programmaticQualityLock = 0;
     let userManuallyChangedQuality = false;
@@ -96,7 +102,7 @@ if (!window.__youtubeAudioModeLoaded) {
 
     if (chrome.runtime?.id) {
         try {
-            chrome.storage.sync.get(['audioMode', 'language', 'playbackSpeed', 'userSetSpeed'], async function (result) {
+            chrome.storage.sync.get(['audioMode', 'autoMusic', 'language', 'playbackSpeed', 'userSetSpeed'], async function (result) {
                 if (chrome.runtime.lastError) return;
 
                 if (result.language) {
@@ -106,7 +112,11 @@ if (!window.__youtubeAudioModeLoaded) {
                     await loadMessages(detectedLang);
                 }
 
+                autoMusicEnabled = result.autoMusic !== false;
+                injectYouTubeAPIHook();
+
                 if (result.audioMode) enableAudioMode();
+                else evaluateAutoMusic();
 
                 if (result.userSetSpeed !== undefined && result.playbackSpeed) {
                     userSetSpeed = result.userSetSpeed;
@@ -158,11 +168,18 @@ if (!window.__youtubeAudioModeLoaded) {
 
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action === 'toggleAudioMode') {
-            if (audioModeEnabled) disableAudioMode();
-            else enableAudioMode();
-            sendResponse({ enabled: audioModeEnabled });
+            if (audioModeEnabled) {
+                // If the user switches off an auto-enabled video, leave that video alone
+                if (autoActive) suppressedVideoId = getCurrentVideoId();
+                disableAudioMode();
+            } else {
+                autoActive = false;
+                setAutoBadge(false);
+                enableAudioMode();
+            }
+            sendResponse({ enabled: audioModeEnabled, auto: autoActive });
         } else if (request.action === 'getStatus') {
-            sendResponse({ enabled: audioModeEnabled });
+            sendResponse({ enabled: audioModeEnabled, auto: autoActive });
         } else if (request.action === 'updateTheme') {
             updateOverlayTheme(request.backgroundType, request.backgroundValue);
             sendResponse({ success: true });
@@ -249,13 +266,19 @@ if (!window.__youtubeAudioModeLoaded) {
         setQualityWhenReady();
 
         if (chrome.runtime?.id) {
-            try { chrome.storage.sync.set({ audioMode: true }); } catch (e) { }
+            if (!autoActive) {
+                try { chrome.storage.sync.set({ audioMode: true }); } catch (e) { }
+            }
         }
         startUsageTracking();
     }
 
     function disableAudioMode() {
         audioModeEnabled = false;
+        if (autoActive) {
+            autoActive = false;
+            setAutoBadge(false);
+        }
         const video = getVideoElement();
         if (video) video.style.opacity = '1';
 
@@ -754,6 +777,94 @@ if (!window.__youtubeAudioModeLoaded) {
         };
     }
 
+    // ===== AUTO MUSIC DETECTION =====
+    function getCurrentVideoId() {
+        try { return new URLSearchParams(location.search).get('v'); } catch (e) { return null; }
+    }
+
+    function queryMusicInfo() {
+        return new Promise(resolve => {
+            const id = Math.random().toString(36).slice(2);
+            const handler = (event) => {
+                if (event.source !== window || !event.data || event.data.type !== 'AM_MUSIC_INFO' || event.data.id !== id) return;
+                window.removeEventListener('message', handler);
+                clearTimeout(timer);
+                resolve(event.data.info || null);
+            };
+            const timer = setTimeout(() => {
+                window.removeEventListener('message', handler);
+                resolve(null);
+            }, 800);
+            window.addEventListener('message', handler);
+            window.postMessage({ type: 'AM_MUSIC_QUERY', id }, '*');
+        });
+    }
+
+    // Decide whether the current video is "music you'd just listen to"
+    function classifyMusic(info) {
+        const params = new URLSearchParams(location.search);
+        const list = params.get('list') || '';
+
+        if (info && info.isLive) return false; // never auto-switch live streams
+
+        const type = info && info.musicVideoType;
+        if (type === 'MUSIC_VIDEO_TYPE_ATV' || type === 'MUSIC_VIDEO_TYPE_OMV') return true; // audio track / official music video
+        if (info && /\s-\sTopic$/.test(info.author || '')) return true;                        // auto-generated "Artist - Topic" channel
+        if (params.get('start_radio') === '1') return true;                                     // started from a Mix / radio
+        if (/^(OLAK5uy_|RDCLAK|RDAMVM|RDAMPL)/.test(list)) return true;                         // album / music mix playlists
+        return false;
+    }
+
+    function setAutoBadge(on) {
+        if (!chrome.runtime?.id) return;
+        try { chrome.runtime.sendMessage({ action: 'autoBadge', enabled: on }).catch(() => { }); } catch (e) { }
+    }
+
+    async function evaluateAutoMusic() {
+        const token = ++autoEvalToken;
+        if (!autoMusicEnabled) return;
+        if (!location.pathname.startsWith('/watch')) return;
+
+        const videoId = getCurrentVideoId();
+        if (!videoId) return;
+
+        // Wait until YouTube's player data matches the new video (SPA navigation lags a bit)
+        let info = null;
+        for (let i = 0; i < 12; i++) {
+            const result = await queryMusicInfo();
+            if (token !== autoEvalToken) return;
+            if (result && result.videoId === videoId) { info = result; break; }
+            await delay(500);
+            if (token !== autoEvalToken) return;
+        }
+
+        // Global (manual) audio mode always wins
+        if (audioModeEnabled && !autoActive) return;
+
+        const isMusic = classifyMusic(info);
+        console.log('[Audio Mode] Auto music check:', videoId, info && info.musicVideoType, '->', isMusic);
+
+        if (isMusic && suppressedVideoId !== videoId) {
+            autoActive = true;
+            setAutoBadge(true);
+            enableAudioMode(); // (re)applies overlay + low quality for this video
+        } else if (autoActive) {
+            disableAudioMode();
+        }
+    }
+
+    if (chrome.runtime?.id) {
+        chrome.storage.onChanged.addListener((changes, namespace) => {
+            if (namespace !== 'sync' || !changes.autoMusic) return;
+            autoMusicEnabled = changes.autoMusic.newValue !== false;
+            if (autoMusicEnabled) {
+                if (!audioModeEnabled) evaluateAutoMusic();
+            } else if (autoActive) {
+                disableAudioMode();
+            }
+        });
+    }
+
     let lastUrl = location.href;
 
     function handleNavigation() {
@@ -766,8 +877,10 @@ if (!window.__youtubeAudioModeLoaded) {
             setProgrammaticLock();
             userManuallyChangedQuality = false;
 
-            if (audioModeEnabled) {
+            if (audioModeEnabled && !autoActive) {
                 setTimeout(() => enableAudioMode(), TIMING.RETRY_DELAY);
+            } else {
+                evaluateAutoMusic();
             }
 
             setTimeout(attachVideoPushListeners, TIMING.RETRY_DELAY + 500);

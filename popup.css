@@ -828,3 +828,45 @@ input[type="color"]::-webkit-color-swatch {
 .footer a:hover {
   color: rgba(255, 255, 255, 0.8);
 }
+
+/* Auto Music row */
+.auto-music-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -6px 0 12px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+}
+.auto-music-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.auto-music-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+.auto-music-hint {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+}
+.toggle-switch.small {
+  width: 38px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.toggle-switch.small .slider:before {
+  height: 12px;
+  width: 12px;
+}
+.toggle-switch.small input:checked + .slider:before {
+  transform: translateX(18px);
+}
+[dir="rtl"] .auto-music-row {
+  flex-direction: row-reverse;
+  text-align: right;
+}

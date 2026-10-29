@@ -89,13 +89,18 @@ function handleYouTubeNavigation(tabId, url) {
     // Only handle watch pages
     if (!url || !url.includes('youtube.com/watch')) return;
 
-    chrome.storage.sync.get(['audioMode'], (result) => {
-        if (result.audioMode) {
+    chrome.storage.sync.get(['audioMode', 'autoMusic'], (result) => {
+        // Inject when audio mode is on globally OR auto-music is on (default)
+        if (result.audioMode || result.autoMusic !== false) {
             // Try to send message to existing content script
             chrome.tabs.sendMessage(tabId, { action: 'getStatus' }, (response) => {
                 if (chrome.runtime.lastError) {
                     // Content script not loaded, inject it
                     console.log('[Audio Mode] Injecting content script for new navigation');
+                    chrome.scripting.insertCSS({
+                        target: { tabId: tabId },
+                        files: ['overlay.css']
+                    }).catch(() => { });
                     chrome.scripting.executeScript({
                         target: { tabId: tabId },
                         files: ['content.js']
@@ -107,6 +112,23 @@ function handleYouTubeNavigation(tabId, url) {
         }
     });
 }
+
+// Per-tab "AUTO" badge when audio mode was switched on automatically for music
+chrome.runtime.onMessage.addListener((msg, sender) => {
+    if (msg && msg.action === 'autoBadge' && sender.tab && sender.tab.id !== undefined) {
+        const tabId = sender.tab.id;
+        if (msg.enabled) {
+            chrome.action.setBadgeText({ tabId, text: 'AUTO' }).catch(() => { });
+            chrome.action.setBadgeBackgroundColor({ tabId, color: '#3cba92' }).catch(() => { });
+        } else {
+            // Clear the tab-specific badge so the global one shows again
+            chrome.storage.sync.get(['audioMode'], (r) => {
+                chrome.action.setBadgeText({ tabId, text: r.audioMode ? 'ON' : '' }).catch(() => { });
+                chrome.action.setBadgeBackgroundColor({ tabId, color: '#667eea' }).catch(() => { });
+            });
+        }
+    }
+});
 
 // Listen for YouTube SPA navigation (when clicking videos within YouTube)
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {

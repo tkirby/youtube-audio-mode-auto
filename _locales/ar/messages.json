@@ -162,5 +162,13 @@
     "noVideo": {
         "message": "لا يوجد فيديو يعمل حاليا",
         "description": "Message shown when no video is currently active"
+    },
+    "autoMusicTitle": {
+        "message": "تشغيل تلقائي للموسيقى",
+        "description": "Auto music toggle label"
+    },
+    "autoMusicHint": {
+        "message": "الأغاني وقنوات Topic والألبومات والمزيج",
+        "description": "Auto music toggle hint"
     }
 }

@@ -1,10 +1,10 @@
 {
     "manifest_version": 3,
-    "name": "__MSG_appName__",
-    "version": "2.1.0",
-    "description": "__MSG_extDescription__",
+    "name": "YouTube Audio Mode (Auto Music)",
+    "version": "2.1.1",
+    "description": "Audio-only YouTube that switches on automatically for songs. Modified from devahmedadli/youtube-audio-mode (MIT).",
     "default_locale": "en",
-    "homepage_url": "https://github.com/Ahmed/youtube-audio-mode",
+    "homepage_url": "https://github.com/devahmedadli/youtube-audio-mode",
     "permissions": [
         "storage",
         "activeTab",

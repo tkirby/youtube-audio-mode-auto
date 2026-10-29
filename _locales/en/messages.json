@@ -162,5 +162,13 @@
     "noVideo": {
         "message": "No Video Playing",
         "description": "Message shown when no video is currently active"
+    },
+    "autoMusicTitle": {
+        "message": "Auto-enable for music",
+        "description": "Auto music toggle label"
+    },
+    "autoMusicHint": {
+        "message": "Songs, Topic channels, albums & mixes",
+        "description": "Auto music toggle hint"
     }
 }
