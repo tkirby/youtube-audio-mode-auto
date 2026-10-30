@@ -53,7 +53,7 @@ The original extension ended up changing quality by clicking through YouTube's s
 
 This fork isn't on the Chrome Web Store, so it's installed manually in Developer Mode:
 
-1.  Clone or download the [`auto-music` branch](https://github.com/tkirby/youtube-audio-mode-auto/tree/auto-music) of this repository. The `main` branch is the original extension, without these features.
+1.  Clone or download this repository.
 2.  Open Chrome and go to `chrome://extensions/`.
 3.  Enable **Developer mode** in the top-right corner.
 4.  Click **Load unpacked**.
