@@ -383,7 +383,7 @@ if (!window.__youtubeAudioModeLoaded) {
             if (!settingsButton) return;
 
             settingsButton.click();
-            await delay(150);
+            await delay(500);
 
             // Multilingual detection: Find the menu item based on common strings or regex matching resolutions (e.g. 480p)
             const qualityMenuItem = Array.from(document.querySelectorAll('.ytp-menuitem')).find(item => {
@@ -472,6 +472,7 @@ if (!window.__youtubeAudioModeLoaded) {
         if (cappedForUrl === location.href && qualityCapActive) return; // already capped for this video
 
         const current = await playerCall('getPlaybackQuality');
+        if (!audioModeEnabled) return; // switched out while waiting for the player
         if (current && !LOW_QUALITIES.includes(current) && current !== 'unknown' && current !== 'auto') {
             preCapQuality = current;
         }
@@ -556,7 +557,12 @@ if (!window.__youtubeAudioModeLoaded) {
         const userPicked = userManuallyChangedQuality;
         userManuallyChangedQuality = false;
 
-        if (userPicked) return; // respect a quality the user chose themselves
+        if (userPicked) {
+            // Respect a quality the user chose themselves, but if the player is still at
+            // 144p the change wasn't a real pick (e.g. an ad) and the cap must still come off
+            const q = await playerCall('getPlaybackQuality');
+            if (!hadCap || !LOW_QUALITIES.includes(q)) return;
+        }
 
         try {
             if (immediate && (hadCap || wasForcedViaUI)) {
@@ -650,6 +656,7 @@ if (!window.__youtubeAudioModeLoaded) {
 
     let setQualityRetries = 0;
     function setLowestQuality() {
+        if (!audioModeEnabled) return; // a delayed call must not cap a video after switch-out
         const player = document.getElementById('movie_player');
         const video = getVideoElement();
 
@@ -876,7 +883,7 @@ if (!window.__youtubeAudioModeLoaded) {
             const result = await queryMusicInfo();
             if (token !== autoEvalToken) return;
             if (result && result.videoId === videoId) { info = result; break; }
-            await delay(500);
+            await delay(150);
             if (token !== autoEvalToken) return;
         }
 
@@ -891,7 +898,7 @@ if (!window.__youtubeAudioModeLoaded) {
             setAutoBadge(true);
             enableAudioMode(); // (re)applies overlay + low quality for this video
         } else if (autoActive) {
-            disableAudioMode();
+            disableAudioMode({ immediate: true }); // new video: almost nothing buffered to lose
         }
     }
 
@@ -919,6 +926,7 @@ if (!window.__youtubeAudioModeLoaded) {
             setProgrammaticLock();
             userManuallyChangedQuality = false;
             cappedForUrl = null;
+            preCapQuality = null; // belongs to the previous video
 
             if (audioModeEnabled && !autoActive) {
                 setTimeout(() => enableAudioMode(), TIMING.RETRY_DELAY);
