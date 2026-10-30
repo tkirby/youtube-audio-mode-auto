@@ -45,6 +45,12 @@ if (!window.__youtubeAudioModeLoaded) {
     let autoActive = false;           // true when current audio mode was turned on automatically
     let suppressedVideoId = null;     // user turned audio mode off on this auto-detected video
     let autoEvalToken = 0;
+    let heldForVideoId = null;        // last video held back while being classified
+    let heldVideo = null;
+    let holdHandler = null;
+    let holdTimer = null;
+    let pausedByHold = false;
+    const HOLD_MAX = 2000;            // never keep a video waiting longer than this
 
     // Bi-directional Sync Variables
     let programmaticQualityLock = 0;
@@ -258,8 +264,10 @@ if (!window.__youtubeAudioModeLoaded) {
 
         const setQualityWhenReady = () => {
             if (video.readyState >= 2 && !video.paused) {
-                setLowestQuality();
+                return setLowestQuality();
             } else {
+                // Cap now so it doesn't start in high quality; the checks below catch
+                // the case where the player drops a cap set before the video has loaded
                 const playListener = () => {
                     setTimeout(() => {
                         setLowestQuality();
@@ -271,10 +279,12 @@ if (!window.__youtubeAudioModeLoaded) {
                 setTimeout(() => {
                     if (audioModeEnabled) setLowestQuality();
                 }, TIMING.FALLBACK_TIMEOUT);
+
+                return setLowestQuality();
             }
         };
 
-        setQualityWhenReady();
+        await setQualityWhenReady();
 
         if (chrome.runtime?.id) {
             if (!autoActive) {
@@ -383,7 +393,7 @@ if (!window.__youtubeAudioModeLoaded) {
             if (!settingsButton) return;
 
             settingsButton.click();
-            await delay(500);
+            await delay(150);
 
             // Multilingual detection: Find the menu item based on common strings or regex matching resolutions (e.g. 480p)
             const qualityMenuItem = Array.from(document.querySelectorAll('.ytp-menuitem')).find(item => {
@@ -469,10 +479,10 @@ if (!window.__youtubeAudioModeLoaded) {
     // chunk boundary like its own "Auto" switches, so the buffer isn't thrown away.
     const forceLowestQuality = async (player, video) => {
         if (userManuallyChangedQuality) return;
-        if (cappedForUrl === location.href && qualityCapActive) return; // already capped for this video
 
         const current = await playerCall('getPlaybackQuality');
         if (!audioModeEnabled) return; // switched out while waiting for the player
+        if (cappedForUrl === location.href && qualityCapActive && LOW_QUALITIES.includes(current)) return; // cap has taken
         if (current && !LOW_QUALITIES.includes(current) && current !== 'unknown' && current !== 'auto') {
             preCapQuality = current;
         }
@@ -668,7 +678,7 @@ if (!window.__youtubeAudioModeLoaded) {
             return;
         }
         setQualityRetries = 0;
-        forceLowestQuality(player, video);
+        return forceLowestQuality(player, video);
     }
 
     async function createAudioModeOverlay() {
@@ -869,6 +879,33 @@ if (!window.__youtubeAudioModeLoaded) {
         try { chrome.runtime.sendMessage({ action: 'autoBadge', enabled: on }).catch(() => { }); } catch (e) { }
     }
 
+    // Keep a new video from starting until we know whether it's music, so a song doesn't
+    // play a moment in full quality and then rebuffer. The HOLD_MAX timer is the safety
+    // net: playback always comes back, even if detection never finishes.
+    function holdPlayback() {
+        if (heldVideo) return;
+        const video = getVideoElement();
+        if (!video) return;
+        heldVideo = video;
+        holdHandler = () => {
+            pausedByHold = true;
+            video.pause();
+        };
+        video.addEventListener('play', holdHandler);
+        if (!video.paused) holdHandler();
+        holdTimer = setTimeout(releasePlayback, HOLD_MAX);
+    }
+
+    function releasePlayback() {
+        if (!heldVideo) return;
+        clearTimeout(holdTimer);
+        heldVideo.removeEventListener('play', holdHandler);
+        if (pausedByHold) heldVideo.play().catch(() => { });
+        heldVideo = null;
+        holdHandler = null;
+        pausedByHold = false;
+    }
+
     async function evaluateAutoMusic() {
         const token = ++autoEvalToken;
         if (!autoMusicEnabled) return;
@@ -877,9 +914,15 @@ if (!window.__youtubeAudioModeLoaded) {
         const videoId = getCurrentVideoId();
         if (!videoId) return;
 
+        // Only hold a video once, and only when it would otherwise start in full quality
+        if (!audioModeEnabled && heldForVideoId !== videoId) {
+            heldForVideoId = videoId;
+            holdPlayback();
+        }
+
         // Wait until YouTube's player data matches the new video (SPA navigation lags a bit)
         let info = null;
-        for (let i = 0; i < 12; i++) {
+        for (let i = 0; i < 40; i++) {
             const result = await queryMusicInfo();
             if (token !== autoEvalToken) return;
             if (result && result.videoId === videoId) { info = result; break; }
@@ -888,7 +931,10 @@ if (!window.__youtubeAudioModeLoaded) {
         }
 
         // Global (manual) audio mode always wins
-        if (audioModeEnabled && !autoActive) return;
+        if (audioModeEnabled && !autoActive) {
+            releasePlayback();
+            return;
+        }
 
         const isMusic = classifyMusic(info);
         console.log('[Audio Mode] Auto music check:', videoId, info && info.musicVideoType, '->', isMusic);
@@ -896,10 +942,11 @@ if (!window.__youtubeAudioModeLoaded) {
         if (isMusic && suppressedVideoId !== videoId) {
             autoActive = true;
             setAutoBadge(true);
-            enableAudioMode(); // (re)applies overlay + low quality for this video
+            await enableAudioMode(); // (re)applies overlay + low quality for this video
         } else if (autoActive) {
             disableAudioMode({ immediate: true }); // new video: almost nothing buffered to lose
         }
+        if (token === autoEvalToken) releasePlayback();
     }
 
     if (chrome.runtime?.id) {
